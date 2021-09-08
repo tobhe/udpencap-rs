@@ -1,0 +1,13 @@
+[package]
+name = "riked"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.11.0", features = ["full"] }
+tun = { version = "0.5", git = "https://github.com/hargonix/rust-tun", features = ["async"]}
+futures = "0.3"
+packet = "0.1.4"
+crypto = { version = "0.3", features = ["aead"] }
