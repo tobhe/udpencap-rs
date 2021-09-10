@@ -6,8 +6,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.11.0", features = ["full"] }
-tun = { version = "0.5", git = "https://github.com/hargonix/rust-tun", features = ["async"]}
+tun = { version = "0.5", git = "https://github.com/hargonix/rust-tun" }
+mio = { version = "0.7.13", features = ["os-ext", "os-poll", "net"] }
 futures = "0.3"
-packet = "0.1.4"
-crypto = { version = "0.3", features = ["aead"] }
+crypto = { version = "0.3", features = ["aead", "std"] }
+bytes = "1.1.0"
+aes-gcm = "0.9.4"

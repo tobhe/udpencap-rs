@@ -12,12 +12,29 @@
 //
 //  0. You just DO WHAT THE FUCK YOU WANT TO.
 
-use futures::{SinkExt, StreamExt};
-use packet::{builder::Builder, icmp, ip, Packet};
-use tun::{self, Configuration, TunPacket};
+use crate::esp::{EncryptedPacket, Packet, Repr};
+use aes_gcm::NewAead;
+use bytes::BytesMut;
+use mio::net::UdpSocket;
+use mio::{unix::SourceFd, Events, Interest, Poll, Token};
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
+use std::time::Duration;
+use tun::{Configuration, Device};
 
-#[tokio::main]
-async fn main() {
+// mod packet;
+mod esp;
+mod util;
+
+const UDP: Token = Token(0);
+const TUN: Token = Token(1);
+
+fn main() {
+    let key = aes_gcm::Key::from_slice(b"abcdefghijklopqr");
+    let aes = aes_gcm::Aes128Gcm::new(key);
+    let salt = [0, 0, 0, 0];
+
     let mut config = Configuration::default();
 
     config
@@ -31,52 +48,60 @@ async fn main() {
         config.packet_information(true);
     });
 
-    let dev = tun::create_as_async(&config).unwrap();
+    let mut tun = tun::create(&config).unwrap();
+    let tun_mtu = tun.mtu().unwrap() as usize;
+    let mut socket = UdpSocket::bind("0.0.0.0:0".parse().unwrap()).unwrap();
+    let peer_address = "10.1.0.47:12349".parse().unwrap();
 
-    let mut framed = dev.into_framed();
+    let mut poll = Poll::new().unwrap();
+    poll.registry()
+        .register(&mut SourceFd(&tun.as_raw_fd()), TUN, Interest::READABLE)
+        .unwrap();
+    poll.registry()
+        .register(&mut socket, UDP, Interest::READABLE)
+        .unwrap();
+    let mut events = Events::with_capacity(128);
 
-    while let Some(packet) = framed.next().await {
-        match packet {
-            Ok(pkt) => {
-                println!("{:X?}", pkt.get_bytes());
-                match ip::Packet::new(pkt.get_bytes()) {
-                    Ok(ip::Packet::V4(pkt)) => match icmp::Packet::new(pkt.payload()) {
-                        Ok(icmp) => match icmp.echo() {
-                            Ok(icmp) => {
-                                let reply = ip::v4::Builder::default()
-                                    .id(0x42)
-                                    .unwrap()
-                                    .ttl(64)
-                                    .unwrap()
-                                    .source(pkt.destination())
-                                    .unwrap()
-                                    .destination(pkt.source())
-                                    .unwrap()
-                                    .icmp()
-                                    .unwrap()
-                                    .echo()
-                                    .unwrap()
-                                    .reply()
-                                    .unwrap()
-                                    .identifier(icmp.identifier())
-                                    .unwrap()
-                                    .sequence(icmp.sequence())
-                                    .unwrap()
-                                    .payload(icmp.payload())
-                                    .unwrap()
-                                    .build()
-                                    .unwrap();
-                                framed.send(TunPacket::new(reply)).await.unwrap();
-                            }
-                            _ => {}
-                        },
-                        _ => {}
-                    },
-                    Err(err) => println!("Received an invalid packet: {:?}", err),
-                    _ => {}
+    loop {
+        poll.poll(&mut events, Some(Duration::from_millis(10)))
+            .unwrap();
+        for event in events.iter() {
+            if event.is_error() {
+                println!("Error: {:?}", event);
+                continue;
+            }
+
+            match event.token() {
+                UDP if event.is_readable() => {
+                    let mut buf = BytesMut::with_capacity(tun_mtu);
+                    let num_recv = socket.recv(&mut buf).unwrap();
+                    let buf = buf.freeze();
+                    let encrypted_packet =
+                        EncryptedPacket::new_checked(buf.slice(4..num_recv)).unwrap();
+                    let decrypted_packet = encrypted_packet.decrypt(&aes, salt).unwrap();
+                    tun.write(&decrypted_packet.payload()).unwrap();
+                }
+                TUN if event.is_readable() => {
+                    let mut buf = Vec::with_capacity(tun_mtu);
+                    let num_recv = tun.read(&mut buf).unwrap();
+                    let repr = Repr::new(1, 1, 4);
+                    let encrypted_packet = repr
+                        .emit(
+                            num_recv,
+                            |vec| vec.extend_from_slice(&buf[0..num_recv]),
+                            &aes,
+                            [0, 0, 0, 0, 0, 0, 0, 1],
+                            salt,
+                        )
+                        .unwrap();
+                    socket
+                        .send_to(&encrypted_packet.into_inner(), peer_address)
+                        .unwrap();
+                }
+                _ => {
+                    println!("Other event: {:?}", event);
                 }
             }
-            Err(err) => panic!("Error: {:?}", err),
         }
     }
 }
