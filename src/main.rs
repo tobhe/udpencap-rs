@@ -75,6 +75,10 @@ fn main() {
                 UDP if event.is_readable() => {
                     let mut buf = BytesMut::with_capacity(tun_mtu);
                     let num_recv = socket.recv(&mut buf).unwrap();
+                    if (num_recv == 0) {
+                        println!("recv 0");
+                        continue;
+                    }
                     let buf = buf.freeze();
                     let encrypted_packet =
                         EncryptedPacket::new_checked(buf.slice(4..num_recv)).unwrap();
